@@ -1,0 +1,441 @@
+# 0) Mental model you actually need
+
+Disk or LV → make a filesystem → give it a label or use its UUID → mount it now → make it mount at boot → verify with commands, not vibes.
+
+* Filesystems you must handle: **XFS**, **ext4**, **VFAT**
+* Network storage you must handle: **NFS** (client side)
+* Automounting that saves your bacon: **autofs**
+* Growth mindset: extend **LVM** LVs online
+* Permissions: u g o with rwx, plus ACLs, plus the “gotcha trio” of setgid, sticky, and SELinux context
+
+My bias: use XFS for general-purpose data, ext4 when you need shrinking, VFAT only for removable media and special cases.
+
+---
+
+# 1) Create, mount, unmount, and use VFAT, ext4, XFS
+
+## Make filesystems (on a partition or LV)
+
+```bash
+# XFS
+sudo mkfs.xfs  -L DATA_XFS  /dev/vgdata/lv_data
+
+# ext4
+sudo mkfs.ext4 -L DATA_EXT4 /dev/vgdata/lv_data2
+
+# VFAT (FAT32)
+sudo mkfs.vfat -F 32 -n USBMEDIA /dev/sdb1
+```
+
+Labels later:
+
+```bash
+sudo xfs_admin -L NEWLBL   /dev/vgdata/lv_data
+sudo e2label /dev/vgdata/lv_data2 NEWLBL
+sudo fatlabel /dev/sdb1 NEWLBL
+```
+
+Find UUIDs:
+
+```bash
+lsblk -f
+blkid /dev/vgdata/lv_data
+```
+
+## Mount now
+
+```bash
+sudo mkdir -p /data/xfs /data/ext4 /media/usb
+
+sudo mount -t xfs  /dev/vgdata/lv_data     /data/xfs
+sudo mount -t ext4 /dev/vgdata/lv_data2    /data/ext4
+sudo mount -t vfat /dev/sdb1               /media/usb
+```
+
+VFAT has no Unix perms. Use mount options to fake it:
+
+```bash
+sudo mount -t vfat -o uid=1000,gid=1000,umask=0077 /dev/sdb1 /media/usb
+```
+
+## Persist at boot with UUID or LABEL
+
+```bash
+# XFS by UUID
+UUID=$(blkid -s UUID -o value /dev/vgdata/lv_data)
+echo "UUID=$UUID  /data/xfs  xfs   defaults  0 0" | sudo tee -a /etc/fstab
+
+# ext4 by LABEL
+echo "LABEL=DATA_EXT4 /data/ext4 ext4 defaults 0 0" | sudo tee -a /etc/fstab
+
+# VFAT usually removable, so add nofail
+UUID=$(blkid -s UUID -o value /dev/sdb1)
+echo "UUID=$UUID  /media/usb  vfat  nofail,uid=1000,gid=1000,umask=0077  0 0" | sudo tee -a /etc/fstab
+
+sudo mount -a
+findmnt /data/xfs /data/ext4 /media/usb
+```
+
+## Unmount cleanly
+
+```bash
+sudo umount /media/usb
+sudo umount /data/xfs
+sudo umount /data/ext4
+```
+
+---
+
+# 2) Mount and unmount NFS
+
+Install client tools if missing:
+
+```bash
+sudo dnf -y install nfs-utils
+```
+
+Discover exports:
+
+```bash
+showmount -e nfsserver.example.com
+```
+
+Mount on demand:
+
+```bash
+sudo mkdir -p /mnt/nfs
+sudo mount -t nfs -o nfsvers=4.2 nfsserver.example.com:/srv/share /mnt/nfs
+findmnt /mnt/nfs
+```
+
+Persist with fstab:
+
+```bash
+echo "nfsserver.example.com:/srv/share  /mnt/nfs  nfs  defaults,_netdev  0 0" | sudo tee -a /etc/fstab
+sudo mount -a
+```
+
+Unmount:
+
+```bash
+sudo umount /mnt/nfs
+```
+
+Tip: use NFSv4 unless your lab explicitly says otherwise.
+
+---
+
+# 3) Configure autofs
+
+Why autofs: it mounts when accessed and unmounts when idle. Saves boot time and avoids hangs when the server is down.
+
+Install and enable:
+
+```bash
+sudo dnf -y install autofs
+sudo systemctl enable --now autofs
+```
+
+## Two common patterns
+
+### A) Indirect map under a parent directory
+
+`/etc/auto.master.d/misc.autofs`
+
+```
+/misc  /etc/auto.misc
+```
+
+`/etc/auto.misc`
+
+```
+docs  -rw,nfsvers=4.2  nfsserver.example.com:/srv/share/docs
+```
+
+Reload and test:
+
+```bash
+sudo systemctl restart autofs
+ls /misc/docs        # triggers mount
+findmnt /misc/docs
+```
+
+### B) Direct map with absolute paths
+
+`/etc/auto.master.d/direct.autofs`
+
+```
+/-  /etc/auto.direct
+```
+
+`/etc/auto.direct`
+
+```
+/mnt/projects  -rw,nfsvers=4.2  nfsserver.example.com:/srv/share/projects
+```
+
+Reload and test:
+
+```bash
+sudo systemctl restart autofs
+ls /mnt/projects
+```
+
+Tweak idle timeout by adding `--timeout=60` on the master line if needed.
+
+Debug when grumpy:
+
+```bash
+sudo automount -f -v   # foreground, verbose (temporary)
+journalctl -u autofs -b
+```
+
+---
+
+# 4) Extend existing logical volumes
+
+First check free space in the VG:
+
+```bash
+vgs
+```
+
+## Case 1: VG already has free extents
+
+XFS:
+
+```bash
+sudo lvextend -r -L +2G /dev/vgdata/lv_data    # -r grows FS automatically
+# or if you forgot -r:
+sudo lvextend -L +2G /dev/vgdata/lv_data
+sudo xfs_growfs /data/xfs
+```
+
+ext4:
+
+```bash
+sudo lvextend -L +2G /dev/vgdata/lv_data2
+sudo resize2fs /dev/vgdata/lv_data2
+```
+
+## Case 2: No free extents in the VG
+
+Add a new partition as a PV and extend the VG:
+
+```bash
+sudo pvcreate /dev/vdb2
+sudo vgextend vgdata /dev/vdb2
+sudo lvextend -r -l +100%FREE /dev/vgdata/lv_data
+```
+
+XFS never shrinks. ext4 can shrink offline, but that is rarely needed on RHCSA. Grow is the golden path.
+
+---
+
+# 5) Diagnose and correct file permission problems
+
+## Read what the system actually enforces
+
+```bash
+ls -l path
+stat -c '%A %a %U:%G %n' path
+namei -mo /path/to/deep/thing   # walk each parent dir perms
+```
+
+## Fix the basics
+
+```bash
+sudo chown user:group /path/to/file
+sudo chmod 640 /path/to/file
+sudo chmod 2775 /srv/shared            # setgid so new files inherit group
+sudo chmod 1777 /srv/drop              # sticky so users cannot delete others' files
+```
+
+## ACLs
+
+```bash
+getfacl /srv/shared
+setfacl -m u:alice:rwx /srv/shared
+setfacl -m d:g:dev:rwx /srv/shared     # default ACL for new files
+setfacl -b /srv/shared                 # remove ACLs if they conflict
+```
+
+## VFAT and NFS gotchas
+
+* VFAT ignores Unix perms. Use mount options `uid=`, `gid=`, `umask=` or `dmask=` and `fmask=`.
+* NFS perms combine server-side export rules with client-side mode bits. If users cannot write, check ownership and group membership on the client, then check the export options on the server.
+
+## Do not forget SELinux
+
+If files came from a tar or another path and now services cannot read them:
+
+```bash
+ls -Z /srv/www
+sudo restorecon -Rv /srv/www
+```
+
+If you disable SELinux to “fix” perms, the exam gods frown.
+
+---
+
+# 6) Labs first, solutions after
+
+Work under a safe area. If you have LVM from earlier tasks, reuse it. If not, replace LV paths with any spare block device you have.
+
+## A. Local filesystems
+
+1. Create XFS on `/dev/vgdata/lv_data` labeled `DATA_XFS`. Mount at `/data/xfs`. Persist by UUID.
+2. Create ext4 on `/dev/vgdata/lv_data2` labeled `DATA_EXT4`. Mount at `/data/ext4`. Persist by LABEL.
+3. Format `/dev/sdb1` as VFAT named `USBMEDIA`. Mount at `/media/usb` so your user owns it and others get no access. Persist with `nofail`.
+
+## B. NFS and autofs
+
+4. Mount `nfsserver:/srv/share/tools` at `/mnt/tools` using NFSv4.2, then unmount.
+5. Configure autofs indirect map under `/misc` so that `/misc/docs` auto-mounts `nfsserver:/srv/share/docs`. Test and show it unmounts after idle.
+6. Configure a direct map so that `/mnt/projects` auto-mounts `nfsserver:/srv/share/projects`.
+
+## C. Extend LVs
+
+7. Extend `/dev/vgdata/lv_data` by 5 GiB and grow the XFS online.
+8. Extend `/dev/vgdata/lv_data2` by 1 GiB and grow ext4 online.
+9. If the VG has no free space, add `/dev/vdb2` as a PV, grow the VG, then repeat 7 or 8.
+
+## D. Permission troubleshooting
+
+10. Create `/srv/shared` with group `dev`, mode `2775`. Add your user to `dev`. Prove new files inherit the `dev` group.
+11. Set a default ACL so group `dev` always gets rwx on new items in `/srv/shared`.
+12. A web app cannot read `/srv/www/html/app`. Fix standard perms first. If still broken, restore SELinux contexts.
+
+---
+
+# Solution key
+
+## A. Local filesystems
+
+```bash
+# 1
+sudo mkfs.xfs -L DATA_XFS /dev/vgdata/lv_data
+sudo mkdir -p /data/xfs
+UUID=$(blkid -s UUID -o value /dev/vgdata/lv_data)
+echo "UUID=$UUID /data/xfs xfs defaults 0 0" | sudo tee -a /etc/fstab
+sudo mount -a && findmnt /data/xfs
+
+# 2
+sudo mkfs.ext4 -L DATA_EXT4 /dev/vgdata/lv_data2
+sudo mkdir -p /data/ext4
+echo "LABEL=DATA_EXT4 /data/ext4 ext4 defaults 0 0" | sudo tee -a /etc/fstab
+sudo mount -a && findmnt /data/ext4
+
+# 3
+sudo mkfs.vfat -F 32 -n USBMEDIA /dev/sdb1
+sudo mkdir -p /media/usb
+UUID=$(blkid -s UUID -o value /dev/sdb1)
+echo "UUID=$UUID /media/usb vfat nofail,uid=$UID,gid=$(id -g),umask=0077 0 0" | sudo tee -a /etc/fstab
+sudo mount -a && findmnt /media/usb
+```
+
+## B. NFS and autofs
+
+```bash
+# 4
+sudo dnf -y install nfs-utils
+sudo mkdir -p /mnt/tools
+sudo mount -t nfs -o nfsvers=4.2 nfsserver:/srv/share/tools /mnt/tools
+findmnt /mnt/tools
+sudo umount /mnt/tools
+
+# 5 indirect map
+echo "/misc  /etc/auto.misc" | sudo tee /etc/auto.master.d/misc.autofs
+echo "docs -rw,nfsvers=4.2 nfsserver:/srv/share/docs" | sudo tee /etc/auto.misc
+sudo systemctl restart autofs
+ls /misc/docs
+findmnt /misc/docs
+# wait for idle timeout (default ~5 min) or shorten:
+# echo "/misc  /etc/auto.misc --timeout=60" | sudo tee /etc/auto.master.d/misc.autofs
+# sudo systemctl restart autofs
+
+# 6 direct map
+echo "/-  /etc/auto.direct" | sudo tee /etc/auto.master.d/direct.autofs
+echo "/mnt/projects -rw,nfsvers=4.2 nfsserver:/srv/share/projects" | sudo tee /etc/auto.direct
+sudo systemctl restart autofs
+ls /mnt/projects
+findmnt /mnt/projects
+```
+
+## C. Extend LVs
+
+```bash
+# 7 XFS grow
+sudo lvextend -r -L +5G /dev/vgdata/lv_data
+df -h /data/xfs
+
+# 8 ext4 grow
+sudo lvextend -L +1G /dev/vgdata/lv_data2
+sudo resize2fs /dev/vgdata/lv_data2
+df -h /data/ext4
+
+# 9 add capacity if needed
+sudo pvcreate /dev/vdb2
+sudo vgextend vgdata /dev/vdb2
+sudo lvextend -r -l +100%FREE /dev/vgdata/lv_data
+```
+
+## D. Permission troubleshooting
+
+```bash
+# 10 setgid shared area
+sudo groupadd -f dev
+sudo install -d -m 2775 -o root -g dev /srv/shared
+sudo usermod -aG dev "$USER"
+newgrp dev <<'EOF'
+touch /srv/shared/testfile
+ls -l /srv/shared/testfile            # group should be dev
+EOF
+
+# 11 default ACL
+sudo setfacl -m d:g:dev:rwx /srv/shared
+getfacl /srv/shared | sed -n '1,20p'
+newgrp dev <<'EOF'
+touch /srv/shared/newfile
+getfacl /srv/shared/newfile | grep -E 'group:dev|default'
+EOF
+
+# 12 SELinux contexts for web content
+sudo chown -R apache:apache /srv/www/html/app
+sudo chmod -R u=rwX,g=rX,o= /srv/www/html/app
+sudo restorecon -Rv /srv/www/html/app
+```
+
+---
+
+## One-page cheat sheet
+
+* **Make FS**
+  `mkfs.xfs -L LBL DEV`
+  `mkfs.ext4 -L LBL DEV`
+  `mkfs.vfat -F 32 -n LBL DEV`
+* **Mount now**
+  `mount -t xfs|ext4|vfat DEV MNT`
+* **fstab**
+  `UUID=<uuid> /path xfs defaults 0 0`
+  `LABEL=NAME /path ext4 defaults 0 0`
+  VFAT: `nofail,uid=,gid=,umask=`
+* **NFS**
+  `showmount -e SERVER`
+  `mount -t nfs -o nfsvers=4.2 SERVER:/export /mnt`
+  fstab: `defaults,_netdev`
+* **autofs**
+  `/etc/auto.master.d/misc.autofs`: `/misc /etc/auto.misc`
+  `/etc/auto.misc`: `docs -rw SERVER:/export/docs`
+  `systemctl restart autofs`
+* **Grow LVs**
+  `lvextend -r -L +N /dev/VG/LV`
+  ext4 manual final step: `resize2fs DEV`
+  No free extents: `pvcreate NEWPV; vgextend VG NEWPV`
+* **Permissions**
+  `chmod 2775 dir` setgid
+  `chmod 1777 dir` sticky
+  `setfacl -m u:alice:rwx path`
+  `namei -mo /deep/path` to debug
+  SELinux fix: `restorecon -Rv PATH`
+
