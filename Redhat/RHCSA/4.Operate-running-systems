@@ -1,0 +1,448 @@
+
+# 0) Mental model
+
+* **Boot and targets**: systemd starts the kernel, then services via targets like `multi-user.target` and `graphical.target`.
+* **Processes**: every task is a process with a PID, priority, and a scheduling policy.
+* **Tuning**: `tuned` applies sensible kernel and sysctl profiles.
+* **Logs**: systemd journal is the source of truth, with optional persistent storage.
+* **Services**: `systemctl` is your front door.
+* **Transfers**: SSH is the secure transport for `scp`, `sftp`, and `rsync`.
+
+Work as a regular user with sudo. Keep SELinux Enforcing and firewalld running. Verify everything.
+
+---
+
+# 1) Boot, reboot, shutdown safely
+
+```bash
+sudo systemctl reboot                   # reboot now
+sudo systemctl poweroff                 # shutdown and power off
+sudo systemctl halt                     # halt CPU
+sudo shutdown -r +5 "Rebooting soon"    # scheduled reboot in 5 minutes
+who -r                                   # show current runlevel-ish info
+```
+
+Check what will start on next boot:
+
+```bash
+systemctl get-default
+```
+
+---
+
+# 2) Boot into different targets
+
+Change the **current** boot (no reboot):
+
+```bash
+sudo systemctl isolate multi-user.target
+sudo systemctl isolate rescue.target
+sudo systemctl isolate graphical.target
+```
+
+Change the **default** for future boots:
+
+```bash
+sudo systemctl set-default multi-user.target
+sudo systemctl set-default graphical.target
+```
+
+Pick a target once at boot from GRUB:
+
+* At the GRUB menu press `e`.
+* Append `systemd.unit=rescue.target` or `systemd.unit=multi-user.target` to the kernel line.
+* Press `Ctrl` + `x` to boot.
+
+Rescue is single user with minimal services. Emergency is even earlier, root shell with almost nothing.
+
+---
+
+# 3) Interrupt boot to gain access (password recovery)
+
+For a system you own, the RHCSA way is `rd.break`.
+
+1. At GRUB, highlight your kernel, press `e`.
+2. On the line starting with `linux` append: `rd.break`
+3. `Ctrl` + `x` to boot. You land in an initramfs shell.
+4. Remount and chroot:
+
+```bash
+mount -o remount,rw /sysroot
+chroot /sysroot
+```
+
+5. Reset the password:
+
+```bash
+passwd root
+touch /.autorelabel      # important for SELinux
+exit
+exit                     # second exit returns to reboot
+```
+
+System relabels on next boot. If you see permission oddities later, you probably skipped the relabel.
+
+Alternative for completeness: append `systemd.unit=emergency.target` or `init=/bin/sh`. `rd.break` is cleaner on RHEL.
+
+---
+
+# 4) Find CPU or memory hogs, then kill
+
+Quick views:
+
+```bash
+top                          # interactive, press 1 to show CPUs
+ps -eo pid,ppid,cmd,%cpu,%mem --sort=-%cpu | head
+ps -eo pid,cmd,%mem --sort=-%mem | head
+free -h
+vmstat 1 5
+```
+
+Per-process details and I/O:
+
+```bash
+dnf -y install sysstat 2>/dev/null || true
+pidstat 1 5                  # CPU by process
+pidstat -r 1 5               # memory stats
+```
+
+Terminate safely:
+
+```bash
+kill -TERM <PID>             # ask politely
+kill -KILL <PID>             # force if needed
+pkill -f "pattern"           # by command pattern
+killall <name>               # by name
+```
+
+Signals you should know: `TERM` 15, `KILL` 9, `HUP` 1, `USR1` app specific.
+
+---
+
+# 5) Adjust process scheduling
+
+Nice values range from -20 to 19. Lower is higher priority.
+
+Start with a nice:
+
+```bash
+nice -n 10 long_job.sh
+```
+
+Change an existing process:
+
+```bash
+renice -n -5 -p <PID>
+```
+
+Real-time policies if required:
+
+```bash
+chrt -p <PID>                  # show policy and priority
+sudo chrt -r -p 80 <PID>       # SCHED_RR, priority 80
+sudo chrt -f -p 50 <PID>       # SCHED_FIFO, priority 50
+```
+
+Sanity rule: do not give random processes real-time priorities. You can starve the system.
+
+---
+
+# 6) Manage tuning profiles
+
+`tuned` picks kernel, sysctl, and governor settings for common roles.
+
+```bash
+sudo dnf -y install tuned
+sudo systemctl enable --now tuned
+tuned-adm list                 # available profiles
+tuned-adm active               # current profile
+tuned-adm recommend            # suggestion based on hardware
+sudo tuned-adm profile throughput-performance
+# other common: balanced, powersave, latency-performance, virtual-guest,
+# network-latency, network-throughput
+```
+
+Verify:
+
+```bash
+tuned-adm active
+```
+
+---
+
+# 7) System logs and journals
+
+Core views:
+
+```bash
+journalctl -xe                          # recent errors with context
+journalctl -b                           # current boot
+journalctl -b -1                        # previous boot
+journalctl -u sshd                      # unit specific
+journalctl -u sshd --since "1 hour ago"
+journalctl --disk-usage
+```
+
+Classic logs still exist in `/var/log` for some services:
+
+```bash
+ls -1 /var/log
+sudo tail -n 50 /var/log/messages 2>/dev/null || true
+```
+
+---
+
+# 8) Preserve journals (persistent logging)
+
+By default many systems keep logs in memory only. Make them persistent.
+
+Option A, preferred:
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
+Option B via config:
+
+```bash
+sudoedit /etc/systemd/journald.conf
+# set: Storage=persistent
+sudo systemctl restart systemd-journald
+```
+
+Retention controls:
+
+```bash
+journalctl --vacuum-time=14d
+journalctl --vacuum-size=500M
+journalctl --verify
+```
+
+---
+
+# 9) Start, stop, and check network services
+
+Common services: `NetworkManager`, `sshd`, `firewalld`, `chronyd`, `httpd` (if installed).
+
+```bash
+sudo systemctl enable --now NetworkManager firewalld sshd
+systemctl status sshd --no-pager
+systemctl is-enabled NetworkManager firewalld sshd
+ss -lntp | grep -E ':(22|80)\b'
+```
+
+Mask to prevent any start:
+
+```bash
+sudo systemctl mask telnet.socket
+sudo systemctl unmask telnet.socket
+```
+
+---
+
+# 10) Secure file transfer
+
+SSH is the transport. Keys are your friend.
+
+Keys:
+
+```bash
+ssh-keygen -t ed25519 -C "lab"
+ssh-copy-id user@serverB
+```
+
+Copy files:
+
+```bash
+scp /etc/hosts user@serverB:/tmp/hosts.copy
+scp -P 2222 user@serverB:/etc/issue /tmp/issue.serverB
+```
+
+SFTP session:
+
+```bash
+sftp user@serverB
+sftp> put localfile
+sftp> get remotefile
+```
+
+Rsync over SSH:
+
+```bash
+rsync -avz -e ssh /var/www/ user@serverB:/backup/www/
+rsync -av --delete -e ssh user@serverB:/data/ /local/data/
+```
+
+Flags to remember: `-a` archive, `-v` verbose, `-z` compression, `--delete` mirror exactly.
+
+---
+
+# Pitfalls that burn time
+
+* Forgetting `touch /.autorelabel` after resetting root password with SELinux enforcing.
+* Mixing runtime and permanent firewall changes. If you set permanent, reload.
+* Changing the default target then wondering why the current session did not switch. Use `isolate` for now, `set-default` for later.
+* Killing the wrong process. Verify with `ps` and `systemctl status` first.
+* Making journals persistent but not restarting `systemd-journald`. Always verify with `journalctl -b -1` after a reboot.
+
+Tiny humor break: if the journal could talk, it would say “I told you exactly what went wrong. You just did not read me.”
+
+---
+
+# Labs first, solutions after
+
+Do these on your RHEL box. Do not peek.
+
+## A. Boot and targets
+
+1. Show the current default target. Switch the running system to `multi-user.target`.
+2. Set `graphical.target` as default for future boots, then switch back to `multi-user.target` for now.
+3. From GRUB, boot one time into `rescue.target` without changing defaults.
+
+## B. Password recovery practice
+
+4. Simulate a lost root password. Use the GRUB `rd.break` method to reset it, ensure SELinux relabels, then log in as root after reboot.
+
+## C. Process control
+
+5. Find the top 5 processes by CPU, then by memory, using `ps`.
+6. Start a CPU hog in the background, lower its priority with `renice`, then kill it gracefully.
+7. Show a process scheduling policy with `chrt -p` and change it safely back.
+
+## D. Tuning
+
+8. Install `tuned`, enable it, list profiles, set `throughput-performance`, and verify it is active.
+9. Ask `tuned-adm recommend` and switch to that profile.
+
+## E. Journals
+
+10. Make journals persistent, reboot, then show logs from the previous boot.
+11. Limit journal storage to 300 MB, verify disk usage, and vacuum anything above 14 days.
+
+## F. Services
+
+12. Ensure `NetworkManager`, `firewalld`, and `sshd` are enabled and active.
+13. Install `httpd`, start it, enable it, and prove port 80 is listening.
+14. Mask a legacy service unit such as `telnet.socket`, then unmask it.
+
+## G. Secure transfers
+
+15. Generate an ed25519 key pair, copy it to `user@serverB`, then `scp` `/etc/issue` back to `/tmp/`.
+16. Use `rsync` to mirror `/var/tmp/testdata/` to `user@serverB:/tmp/testdata/` with archive and compression.
+
+---
+
+# Solution key
+
+## A. Boot and targets
+
+```bash
+# 1
+systemctl get-default
+sudo systemctl isolate multi-user.target
+
+# 2
+sudo systemctl set-default graphical.target
+sudo systemctl isolate multi-user.target
+
+# 3
+# At GRUB: press e, append systemd.unit=rescue.target, Ctrl+x to boot
+```
+
+## B. Password recovery practice
+
+```bash
+# At GRUB: press e, append rd.break, Ctrl+x
+mount -o remount,rw /sysroot
+chroot /sysroot
+passwd root
+touch /.autorelabel
+exit
+exit     # system reboots and relabels
+```
+
+## C. Process control
+
+```bash
+# 5
+ps -eo pid,ppid,cmd,%cpu --sort=-%cpu | head
+ps -eo pid,ppid,cmd,%mem --sort=-%mem | head
+
+# 6
+yes > /dev/null &   # simple CPU hog, captures PID=$!
+pid=$!
+renice -n 10 -p "$pid"
+kill -TERM "$pid"
+
+# 7
+chrt -p "$pid" 2>/dev/null || true
+# Example on a real service:
+pid=$(pidof sshd); chrt -p "$pid"; chrt -o -p 0 "$pid"; chrt -p "$pid"
+```
+
+## D. Tuning
+
+```bash
+sudo dnf -y install tuned
+sudo systemctl enable --now tuned
+tuned-adm list
+sudo tuned-adm profile throughput-performance
+tuned-adm active
+tuned-adm recommend
+sudo tuned-adm profile "$(tuned-adm recommend | awk '{print $NF}')"
+```
+
+## E. Journals
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemctl restart systemd-journald
+sudo reboot
+# after reboot
+journalctl -b -1 | head
+journalctl --disk-usage
+sudo journalctl --vacuum-size=300M
+sudo journalctl --vacuum-time=14d
+```
+
+## F. Services
+
+```bash
+sudo systemctl enable --now NetworkManager firewalld sshd
+systemctl is-enabled NetworkManager firewalld sshd
+sudo dnf -y install httpd
+sudo systemctl enable --now httpd
+ss -lntp | grep ':80 '
+curl -I http://127.0.0.1:80 2>/dev/null | head -n1
+sudo systemctl mask telnet.socket
+sudo systemctl unmask telnet.socket
+```
+
+## G. Secure transfers
+
+```bash
+ssh-keygen -t ed25519 -C "lab"
+ssh-copy-id user@serverB
+scp user@serverB:/etc/issue /tmp/issue.serverB
+rsync -avz -e ssh /var/tmp/testdata/ user@serverB:/tmp/testdata/
+```
+
+---
+
+## One page cheat sheet
+
+* **Reboot or poweroff**: `systemctl reboot`, `systemctl poweroff`
+* **Targets now**: `systemctl isolate rescue.target`
+* **Targets default**: `systemctl set-default multi-user.target`
+* **GRUB one-time**: append `systemd.unit=rescue.target`
+* **Password reset**: `rd.break` → remount rw → `chroot /sysroot` → `passwd root` → `touch /.autorelabel`
+* **Find hogs**: `ps … --sort=-%cpu` and `--sort=-%mem`, `top`
+* **Kill**: `kill -TERM PID`, then `kill -KILL PID`
+* **Priority**: `nice -n 10 cmd`, `renice -n -5 -p PID`, `chrt -p PID`
+* **Tuned**: `tuned-adm list`, `tuned-adm profile throughput-performance`, `tuned-adm active`
+* **Journal**: `journalctl -b`, `-b -1`, `-u svc`, `--vacuum-time=14d`
+* **Persistent logs**: create `/var/log/journal` or set `Storage=persistent` then restart journald
+* **Services**: `systemctl enable --now sshd`, `status`, `mask`
+* **Transfers**: `scp a b:`, `sftp`, `rsync -avz -e ssh src/ host:dst/`
+
