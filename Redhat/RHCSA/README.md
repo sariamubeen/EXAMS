@@ -6,34 +6,34 @@ Old school discipline. Forward looking habits. Practical above all. This folder 
 
 Each module is a self-contained guide with mental models, must-know commands, pitfalls, labs, and a full solution key.
 
-1. **Essential Tools** → [0.Understand-and-use-essential-tools.md](./0.Understand-and-use-essential-tools.md)
+0. **Essential Tools** → [0.Understand-and-use-essential-tools.md](./0.Understand-and-use-essential-tools.md)
    Shell basics, redirection, grep and regex, SSH, targets, archives, editing, links, permissions, documentation.
 
-2. **Manage Software** → [1.Manage-Software.md](./1.Manage-Software.md)
+1. **Manage Software** → [1.Manage-Software.md](./1.Manage-Software.md)
    Repos, DNF and RPM, module streams, Flatpak, ISO media repos, troubleshooting, speed drills.
 
-3. **Create Simple Shell Scripts** → [2.Create-Simple-shell-Scripts.md](./2.Create-Simple-shell-Scripts.md)
+2. **Create Simple Shell Scripts** → [2.Create-Simple-shell-Scripts.md](./2.Create-Simple-shell-Scripts.md)
    Shebangs, conditionals, loops, arguments, command output, functions, traps, ten tiny exam-grade scripts.
 
-4. **Operate Running Systems** → [3.Operate-running-systems.md](./3.Operate-running-systems.md)
+3. **Operate Running Systems** → [3.Operate-running-systems.md](./3.Operate-running-systems.md)
    Safe reboot, targets, boot interruption for recovery, process control, tuned, journals, services, secure transfers.
 
-5. **Configure Local Storage** → [4.Configure-Local-Storage.md](./4.Configure-Local-Storage.md)
+4. **Configure Local Storage** → [4.Configure-Local-Storage.md](./4.Configure-Local-Storage.md)
    MBR and GPT, LVM from PV to LV, XFS and ext4, UUID and LABEL in fstab, online growth, non-destructive expansion.
 
-6. **Create and Configure File Systems** → [5.Create-and-Configure-file-systems.md](./5.Create-and-Configure-file-systems.md)
+5. **Create and Configure File Systems** → [5.Create-and-Configure-file-systems.md](./5.Create-and-Configure-file-systems.md)
    XFS, ext4, VFAT, NFS client, autofs, extend LVs, permissions and ACLs, SELinux context fixes.
 
-7. **Deploy, Configure, and Maintain Systems** → [6.Deploy-Configure-and-maintain-systems.md](./6.Deploy-Configure-and-maintain-systems.md)
+6. **Deploy, Configure, and Maintain Systems** → [6.Deploy-Configure-and-maintain-systems.md](./6.Deploy-Configure-and-maintain-systems.md)
    at and cron, service management, default targets, chrony, software from CDN or local, GRUB work.
 
-8. **Manage Basic Networking** → [7.Manage-basic-networking.md](./7.Manage-basic-networking.md)
+7. **Manage Basic Networking** → [7.Manage-basic-networking.md](./7.Manage-basic-networking.md)
    IPv4 and IPv6 with nmcli, DNS and hostname, services at boot, firewalld runtime vs permanent, rich rules.
 
-9. **Manage Users and Groups** → [8.Manage-users-and-groups.md](./8.Manage-users-and-groups.md)
+8. **Manage Users and Groups** → [8.Manage-users-and-groups.md](./8.Manage-users-and-groups.md)
    User and group lifecycle, password aging, sudo with drop-ins, shared group directories, gotchas.
 
-10. **Manage Security** → [9.Manage-Security.md](./9.Manage-Security.md)
+9. **Manage Security** → [9.Manage-Security.md](./9.Manage-Security.md)
     Firewalld, umask and default ACLs, SSH keys, SELinux modes, contexts, booleans, port labels, restorecon mastery.
 
 ## How to use this kit
